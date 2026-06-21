@@ -45,3 +45,6 @@ Notes:
   (`checkpoints/svd_xt_1_1.safetensors`, `sonic/…`, `TTS/Qwen3-TTS/…`).
 - LLM → the Ollama store (host Ollama, or the `ollama-models` volume when bundled).
 - Kokoro + default faces → baked into the `tts` / `video` images at build time.
+  The default avatar faces (`services/video/default_faces/`) are **synthetic, AI-generated**
+  — not real people, no copyright/likeness claim (see that folder's README). Consent is
+  required only for *uploaded* real photos.
