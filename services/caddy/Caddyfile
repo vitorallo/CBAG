@@ -1,0 +1,30 @@
+# CBAG edge — HTTPS in front of the backend so the app runs in a secure context
+# (required for the microphone / getUserMedia) and loads cleanly in any browser.
+#
+# Port 443 on the GB10 is taken by the pre-installed Dell demo, so HTTPS is on 8443:
+#   https://<any-of-our-IPs>:8443   (plain http://<host> redirects there)
+#
+# We serve ONE self-signed cert (services/caddy/certs/cbag.crt) that lists every
+# address we're reached on as a SAN — LAN IP, Tailscale IP, localhost. This is
+# required because browsers send NO SNI for a bare IP, so Caddy can't pick a
+# per-host cert; a single multi-SAN cert served for all connections sidesteps that.
+# Regenerate when an IP changes:  scripts/gen-cert.sh
+#
+# The cert is self-signed -> one-time browser "not trusted" warning (click through),
+# or trust services/caddy/certs/cbag.crt once on your machine.
+
+{
+	# We manage our own cert; no ACME, no internal CA, no auto 80->443.
+	auto_https off
+}
+
+:8443 {
+	tls /certs/cbag.crt /certs/cbag.key
+	# Stream SSE + large uploads straight through to the backend.
+	reverse_proxy backend:8000
+}
+
+# Plain HTTP on 80 -> HTTPS, preserving whichever host the client used.
+:80 {
+	redir https://{host}:{$CBAG_HTTPS_PORT:8443}{uri} permanent
+}

@@ -1,0 +1,168 @@
+name: cbag
+
+# Corporate Bullshit Agentic Generator — one-command stack for the Dell GB10.
+# Backend is CPU-only; llm/tts/video get GPU passthrough via the NVIDIA Container
+# Toolkit. Every service binds 0.0.0.0 so the stack is reachable from the LAN
+# (e.g. the Mac) by the GB10's IP. Shared artifact volume lets stages exchange
+# files by job id.
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      # Where the backend finds Ollama. Default reuses an existing host Ollama
+      # via the host gateway. On a fresh box with no Ollama, set
+      # LLM_BASE_URL=http://llm:11434 in .env and start with the bundled-llm
+      # profile (see the `llm` service and scripts/up.sh).
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:11434}
+      CBAG_LLM_MODEL: ${CBAG_LLM_MODEL:-qwen2.5:3b}
+      TTS_BASE_URL: http://tts:8100
+      VIDEO_BASE_URL: http://video:8200
+      ARTIFACT_ROOT: /artifacts
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "0.0.0.0:8000:8000"
+    volumes:
+      - cbag-artifacts:/artifacts
+    depends_on:
+      tts: {condition: service_healthy}
+      video: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  # Bundled Ollama — OFF by default (this GB10 already runs an `ollama-api`
+  # container with models, which we reuse via host.docker.internal). On a host
+  # with no Ollama, enable it:
+  #   set LLM_BASE_URL=http://llm:11434 in .env
+  #   docker compose --profile bundled-llm up -d   (or scripts/up.sh --bundled-llm)
+  llm:
+    image: ollama/ollama:latest
+    profiles: ["bundled-llm"]
+    environment:
+      OLLAMA_HOST: 0.0.0.0
+    ports:
+      - "0.0.0.0:11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+      - cbag-artifacts:/artifacts
+    <<: *gpu
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+  tts:
+    build:
+      context: .
+      dockerfile: services/tts/Dockerfile
+      args:
+        CBAG_CUDA_BASE: ${CBAG_CUDA_BASE:-nvidia/cuda:13.0.1-base-ubuntu24.04}
+    environment:
+      SERVICE_NAME: tts
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+      ARTIFACT_ROOT: /artifacts
+    ports:
+      - "0.0.0.0:8100:8100"
+    volumes:
+      - cbag-artifacts:/artifacts
+    <<: *gpu
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8100/health').status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  video:
+    build:
+      context: .
+      dockerfile: services/video/Dockerfile
+      args:
+        CBAG_CUDA_BASE: ${CBAG_CUDA_BASE:-nvidia/cuda:13.0.1-base-ubuntu24.04}
+    environment:
+      SERVICE_NAME: video
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+      ARTIFACT_ROOT: /artifacts
+      COMFY_URL: http://comfyui:8188
+    ports:
+      - "0.0.0.0:8200:8200"
+    volumes:
+      - cbag-artifacts:/artifacts
+    <<: *gpu
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8200/health').status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # ComfyUI — the talking-head video engine (Blackwell-ready, drives Sonic/Hallo3).
+  # The `video` service submits workflows to it over the HTTP API at :8188.
+  comfyui:
+    build:
+      context: .
+      dockerfile: services/comfyui/Dockerfile
+    ports:
+      - "0.0.0.0:8188:8188"
+    volumes:
+      - comfyui-models:/opt/ComfyUI/models
+      - cbag-artifacts:/artifacts
+    <<: *gpu
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8188/system_stats').status==200 else 1)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    restart: unless-stopped
+
+  # HTTPS edge — terminates TLS (self-signed, Caddy internal CA) and proxies to the
+  # backend. Needed so the app is a secure context (microphone/getUserMedia) and
+  # loads cleanly in any browser. Reach it at https://<CBAG_HOST> (default the GB10 IP).
+  caddy:
+    image: caddy:2
+    environment:
+      CBAG_HOST: ${CBAG_HOST:-localhost}
+      CBAG_HTTPS_PORT: ${CBAG_HTTPS_PORT:-8443}
+    ports:
+      - "0.0.0.0:80:80"                                  # http -> redirects to https
+      - "0.0.0.0:${CBAG_HTTPS_PORT:-8443}:8443"          # https (443 is often the Dell demo)
+    volumes:
+      - ./services/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./services/caddy/certs:/certs:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  cbag-artifacts:
+  ollama-models:   # used only by the bundled-llm profile
+  comfyui-models:  # ComfyUI model weights (Sonic/Hallo3 etc.)
+  caddy-data:      # Caddy's internal CA + issued certs (persist across restarts)
+  caddy-config:

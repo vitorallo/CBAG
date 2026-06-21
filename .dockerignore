@@ -1,0 +1,13 @@
+.git
+.gitignore
+docs
+openspec
+*.md
+frontend/node_modules
+**/__pycache__
+**/*.pyc
+.DS_Store
+.env
+
+.playwright-mcp
+cbag-ui-*.png

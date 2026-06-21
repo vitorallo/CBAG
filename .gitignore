@@ -1,0 +1,25 @@
+# Local config & secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Node / frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# Misc
+.DS_Store
+*.log
+
+# Browser-test artifacts
+.playwright-mcp/
+cbag-ui-*.png
+page-*.png
+
+# Caddy self-signed certs (generated, host-specific)
+services/caddy/certs/
